@@ -2,6 +2,7 @@ import { getConnection } from "./../database/conexcion";
 import path from "path";
 import fs from "fs";
 import config from "./../config";
+import cloudinarySvc from "./../services/cloudinary";
 
 // Función para obtener todos los productos
 const getProductos = async (req, res) => {
@@ -147,6 +148,37 @@ const getPromociones = async (req, res) => {
              ORDER BY d.FECHA_FIN ASC, p.ID DESC`
         );
 
+        const productoIds = rows.map((r) => r.id).filter((v) => v != null);
+        let variantesRows = [];
+        if (productoIds.length > 0) {
+            const placeholders = productoIds.map(() => "?").join(",");
+            const [rowsVar] = await connection.query(
+                `SELECT
+                    IDVARIANTE AS idVariante,
+                    PRODUCTO_ID AS productoId,
+                    TALLA AS talla,
+                    COLOR AS color,
+                    PRECIO AS precio,
+                    STOCK AS stock
+                 FROM PRODUCTO_VARIANTE
+                 WHERE PRODUCTO_ID IN (${placeholders})`,
+                productoIds
+            );
+            variantesRows = rowsVar;
+        }
+        const variantesPorProducto = new Map();
+        for (const v of variantesRows) {
+            const arr = variantesPorProducto.get(v.productoId) || [];
+            arr.push({
+                idVariante: v.idVariante,
+                talla: v.talla,
+                color: v.color,
+                precio: normalizarNumero(v.precio),
+                stock: v.stock == null ? null : Number(v.stock)
+            });
+            variantesPorProducto.set(v.productoId, arr);
+        }
+
         const promos = rows.map((p) => {
             const precioBase = normalizarNumero(p.precioMin);
             const descuentoPorcentaje = p.descuentoPorcentaje == null ? null : Number(p.descuentoPorcentaje);
@@ -164,7 +196,7 @@ const getPromociones = async (req, res) => {
                     nombre: p.descuentoNombre,
                     porcentaje: descuentoPorcentaje
                 },
-                variantes: []
+                variantes: variantesPorProducto.get(p.id) || []
             };
         });
 
@@ -201,9 +233,30 @@ const getProducto = async (req, res) => {
 // Función para agregar un producto con imagen
 const addProducto = async (req, res) => {
     try {
-        const { Nombre, Precio, Cantidad, Descripcion } = req.body;
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
-        const Imagen = req.file ? `${baseUrl}/uploads/${req.file.filename}` : null;
+        const { Nombre, Precio, Cantidad, Descripcion, Talla, Color } = req.body;
+        let Imagen = null;
+        if (req.file) {
+            if (cloudinarySvc.isEnabled()) {
+                try {
+                    if (req.file.buffer) {
+                        const up = await cloudinarySvc.uploadBuffer({ buffer: req.file.buffer });
+                        if (up?.url) Imagen = up.url;
+                    } else if (req.file.path) {
+                        const up = await cloudinarySvc.uploadLocalImage({ filePath: req.file.path });
+                        if (up?.url) Imagen = up.url;
+                        if (fs.existsSync(req.file.path)) {
+                            fs.unlink(req.file.path, () => {});
+                        }
+                    }
+                } catch (e) {
+                    const baseUrl = `${req.protocol}://${req.get("host")}`;
+                    Imagen = req.file.filename ? `${baseUrl}/uploads/${req.file.filename}` : null;
+                }
+            } else {
+                const baseUrl = `${req.protocol}://${req.get("host")}`;
+                Imagen = req.file.filename ? `${baseUrl}/uploads/${req.file.filename}` : null;
+            }
+        }
 
         if (!Nombre || !Precio || !Cantidad || !Imagen) {
             return res.status(400).json({ message: "Por favor completa todos los campos requeridos." });
@@ -250,7 +303,7 @@ const addProducto = async (req, res) => {
         await connection.query(
             `INSERT INTO PRODUCTO_VARIANTE (PRODUCTO_ID, TALLA, COLOR, PRECIO, STOCK)
              VALUES (?, ?, ?, ?, ?)`,
-            [insertProducto.insertId, null, null, isNaN(precio) ? null : precio, isNaN(stock) ? null : stock]
+            [insertProducto.insertId, Talla || null, Color || null, isNaN(precio) ? null : precio, isNaN(stock) ? null : stock]
         );
 
         res.json({ message: "Producto agregado con éxito" });
@@ -263,26 +316,51 @@ const addProducto = async (req, res) => {
 const updateProducto = async (req, res) => {
     try {
         const { id } = req.params;
-        const { Nombre, Precio, Cantidad, Descripcion } = req.body;
+        const { Nombre, Precio, Cantidad, Descripcion, Talla, Color } = req.body;
         const connection = await getConnection();
 
         const [rows] = await connection.query("SELECT IMAGEN AS imagen FROM PRODUCTO WHERE ID = ? LIMIT 1", [id]);
         const currentImage = rows[0]?.imagen;
 
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
-        const Imagen = req.file ? `${baseUrl}/uploads/${req.file.filename}` : null;
+        let Imagen = null;
+        if (req.file) {
+            if (cloudinarySvc.isEnabled()) {
+                try {
+                    if (req.file.buffer) {
+                        const up = await cloudinarySvc.uploadBuffer({ buffer: req.file.buffer });
+                        if (up?.url) Imagen = up.url;
+                    } else if (req.file.path) {
+                        const up = await cloudinarySvc.uploadLocalImage({ filePath: req.file.path });
+                        if (up?.url) Imagen = up.url;
+                        if (fs.existsSync(req.file.path)) {
+                            fs.unlink(req.file.path, () => {});
+                        }
+                    }
+                } catch {
+                    const baseUrl = `${req.protocol}://${req.get("host")}`;
+                    Imagen = req.file.filename ? `${baseUrl}/uploads/${req.file.filename}` : null;
+                }
+            } else {
+                const baseUrl = `${req.protocol}://${req.get("host")}`;
+                Imagen = req.file.filename ? `${baseUrl}/uploads/${req.file.filename}` : null;
+            }
+        }
 
         if (!Nombre || !Precio || !Cantidad) {
             return res.status(400).json({ message: "Por favor completa todos los campos requeridos." });
         }
 
         if (Imagen && currentImage) {
-            const imageName = path.basename(currentImage);
-            const imagePath = path.join(__dirname, '../../uploads', imageName);
-            if (fs.existsSync(imagePath)) {
-                fs.unlink(imagePath, (err) => {
-                    if (err) console.error('Error al eliminar la imagen anterior:', err);
-                });
+            if (cloudinarySvc.isEnabled() && /res\.cloudinary\.com|cloudinary\.com/.test(currentImage)) {
+                await cloudinarySvc.deleteByUrl(currentImage);
+            } else {
+                const imageName = path.basename(currentImage);
+                const imagePath = path.join(__dirname, "../../uploads", imageName);
+                if (fs.existsSync(imagePath)) {
+                    fs.unlink(imagePath, (err) => {
+                        if (err) console.error("Error al eliminar la imagen anterior:", err);
+                    });
+                }
             }
         }
 
@@ -330,14 +408,14 @@ const updateProducto = async (req, res) => {
         const idVariante = varRows[0]?.idVariante;
         if (idVariante) {
             await connection.query(
-                "UPDATE PRODUCTO_VARIANTE SET PRECIO = ?, STOCK = ? WHERE IDVARIANTE = ?",
-                [isNaN(precio) ? null : precio, isNaN(stock) ? null : stock, idVariante]
+                "UPDATE PRODUCTO_VARIANTE SET TALLA = ?, COLOR = ?, PRECIO = ?, STOCK = ? WHERE IDVARIANTE = ?",
+                [Talla || null, Color || null, isNaN(precio) ? null : precio, isNaN(stock) ? null : stock, idVariante]
             );
         } else {
             await connection.query(
                 `INSERT INTO PRODUCTO_VARIANTE (PRODUCTO_ID, TALLA, COLOR, PRECIO, STOCK)
                  VALUES (?, ?, ?, ?, ?)`,
-                [id, null, null, isNaN(precio) ? null : precio, isNaN(stock) ? null : stock]
+                [id, Talla || null, Color || null, isNaN(precio) ? null : precio, isNaN(stock) ? null : stock]
             );
         }
 
@@ -355,17 +433,17 @@ const eliminarImagen = async (id) => {
         const currentImage = rows[0]?.imagen;
 
         if (currentImage) {
-            const imageName = path.basename(currentImage);
-            const imagePath = path.join(__dirname, '../../uploads', imageName);
-
-            console.log(`Nombre de la imagen: ${imageName}`);
-            //console.log(`Ruta completa de la imagen: ${imagePath}`);
-
-            if (fs.existsSync(imagePath)) {
-                fs.unlinkSync(imagePath);  // Eliminar la imagen de forma sincrónica
-                console.log(`Imagen ${imageName} eliminada correctamente.`);
+            if (cloudinarySvc.isEnabled() && /res\.cloudinary\.com|cloudinary\.com/.test(currentImage)) {
+                await cloudinarySvc.deleteByUrl(currentImage);
             } else {
-                console.log(`La imagen ${imageName} no existe en la carpeta uploads.`);
+                const imageName = path.basename(currentImage);
+                const imagePath = path.join(__dirname, "../../uploads", imageName);
+                if (fs.existsSync(imagePath)) {
+                    fs.unlinkSync(imagePath);
+                    console.log(`Imagen ${imageName} eliminada correctamente.`);
+                } else {
+                    console.log(`La imagen ${imageName} no existe en la carpeta uploads.`);
+                }
             }
         } else {
             console.log("No se encontró la imagen asociada con el ID proporcionado.");

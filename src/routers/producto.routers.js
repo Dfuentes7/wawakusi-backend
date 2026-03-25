@@ -2,18 +2,28 @@ import { Router } from "express";
 import { methods as productoController } from "./../controller/producto.controller";
 import multer from "multer";
 import path from "path";
+import fs from "fs";
 import { requireAuth, requirePermission } from "../middleware/auth.middleware";
+import config from "./../config";
 
-// Configuración de multer para guardar las imágenes en la carpeta 'uploads'
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, 'uploads/'); // Carpeta donde se guardarán las imágenes
-    },
-    filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname);
-        cb(null, `${Date.now()}${ext}`); // Renombrar el archivo para evitar duplicados
-    }
-});
+let storage;
+if (config.useCloudinary) {
+    storage = multer.memoryStorage();
+} else {
+    const uploadDir = path.join(__dirname, "../../uploads");
+    try {
+        fs.mkdirSync(uploadDir, { recursive: true });
+    } catch {}
+    storage = multer.diskStorage({
+        destination: (req, file, cb) => {
+            cb(null, uploadDir);
+        },
+        filename: (req, file, cb) => {
+            const ext = path.extname(file.originalname);
+            cb(null, `${Date.now()}${ext}`);
+        }
+    });
+}
 
 // Filtro para permitir solo archivos de imagen
 const fileFilter = (req, file, cb) => {
